@@ -1,0 +1,35 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+myenv/
+venv/
+ENV/
+env/
+.venv/
+
+# Streamlit session and runtime data
+.streamlit/
+
+# Generated experiment artifacts & reports
+static/*.pdf
+lab_report.pdf
+*.csv
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Operating System files
+Thumbs.db
+Desktop.ini
+.DS_Store
