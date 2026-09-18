@@ -474,6 +474,91 @@ def build_knowledge_graph(corpus_docs: list):
     return G, entity_metadata
 
 
+# Lightweight keyword/gazetteer heuristics used only for user-pasted custom text,
+# since custom documents have no hand-annotated entities/triples like DATA_CORPORA.
+CUSTOM_ORG_KEYWORDS = [
+    "university", "institute", "college", "corporation", "corp", "inc",
+    "company", "labs", "laboratory", "laboratories", "foundation", "ltd",
+    "llc", "association", "school", "academy", "organization", "agency"
+]
+
+CUSTOM_LOCATION_GAZETTEER = {
+    "london", "toronto", "new york", "san francisco", "seattle", "montreal",
+    "mountain view", "redmond", "paris", "berlin", "tokyo", "beijing",
+    "mumbai", "delhi", "bangalore", "kharagpur", "boston", "chicago",
+    "los angeles", "washington", "singapore", "dubai", "sydney"
+}
+
+
+def extract_custom_entities_and_triples(text: str):
+    """
+    Heuristic entity/relation extraction for user-supplied text: flags
+    capitalized noun phrases as candidate entities, classifies them via
+    keyword/gazetteer matching, and links entities that co-occur within
+    the same sentence. Not a trained NER model, so results are approximate.
+    """
+    entities = {}
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    sentence_entities = []
+    phrase_pattern = re.compile(r'\b[A-Z][a-zA-Z]*(?:\s+[A-Z][a-zA-Z]*)*\b')
+
+    for sent in sentences:
+        found_in_sentence = []
+        for match in phrase_pattern.finditer(sent):
+            phrase = match.group().strip()
+            if len(phrase) < 3:
+                continue
+            lower = phrase.lower()
+            if lower in CUSTOM_LOCATION_GAZETTEER:
+                etype = "LOCATION"
+            elif any(kw in lower for kw in CUSTOM_ORG_KEYWORDS):
+                etype = "ORGANIZATION"
+            elif len(phrase.split()) == 2:
+                etype = "PERSON"
+            else:
+                etype = "CONCEPT"
+
+            entities.setdefault(phrase, etype)
+            found_in_sentence.append(phrase)
+
+        sentence_entities.append(list(dict.fromkeys(found_in_sentence)))
+
+    triples = []
+    seen_pairs = set()
+    for ents_in_sent in sentence_entities:
+        for i in range(len(ents_in_sent)):
+            for j in range(i + 1, len(ents_in_sent)):
+                pair = tuple(sorted((ents_in_sent[i], ents_in_sent[j])))
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    triples.append((ents_in_sent[i], "related_to", ents_in_sent[j]))
+
+    entity_list = [{"name": name, "type": etype} for name, etype in entities.items()]
+    return entity_list, triples
+
+
+def build_custom_corpus_from_text(raw_text: str) -> list:
+    """
+    Splits user-pasted text into documents (separated by a line containing
+    only '---') and runs heuristic entity/relation extraction on each.
+    """
+    blocks = [b.strip() for b in re.split(r'\n\s*-{3,}\s*\n', raw_text) if b.strip()]
+    docs = []
+    for idx, block in enumerate(blocks, start=1):
+        first_line = block.splitlines()[0].strip()
+        title = first_line[:80] if 0 < len(first_line) < 100 else f"Custom Document {idx}"
+        entities, triples = extract_custom_entities_and_triples(block)
+        docs.append({
+            "doc_id": f"CUSTOM-{idx}",
+            "title": title,
+            "text": block,
+            "entities": entities,
+            "triples": triples,
+            "relevant_to": []
+        })
+    return docs
+
+
 def evaluate_comparative_retrieval(corpus_docs: list, query_str: str,
                                    k1: float = 1.5, b: float = 0.75,
                                    alpha_entity: float = 1.2, top_k: int = 3):
@@ -930,9 +1015,106 @@ Under **Module 2 (Modeling in Information Retrieval)**, retrieval is framed arou
 """)
 
 
+def render_triple_diagram():
+    """Illustrates one sample (head, relation, tail) triple color-coded by entity type."""
+    color_map = {"PERSON": "#8B5CF6", "ORGANIZATION": "#2563EB", "LOCATION": "#10B981"}
+    nodes = [
+        {"name": "Geoffrey Hinton", "type": "PERSON", "x": 0.0},
+        {"name": "University of Toronto", "type": "ORGANIZATION", "x": 1.0},
+        {"name": "Toronto", "type": "LOCATION", "x": 2.0},
+    ]
+    edges = [(0, 1, "affiliated_with"), (1, 2, "located_in")]
+
+    fig = go.Figure()
+    for i, j, rel in edges:
+        fig.add_trace(go.Scatter(
+            x=[nodes[i]["x"], nodes[j]["x"]], y=[0, 0],
+            mode="lines", line=dict(width=2, color="#94A3B8"), hoverinfo="none", showlegend=False
+        ))
+        fig.add_annotation(
+            x=(nodes[i]["x"] + nodes[j]["x"]) / 2, y=0.12,
+            text=f"<i>{rel}</i>", showarrow=False, font=dict(size=11, color="#475569")
+        )
+
+    fig.add_trace(go.Scatter(
+        x=[n["x"] for n in nodes], y=[0] * len(nodes),
+        mode="markers+text",
+        marker=dict(size=42, color=[color_map[n["type"]] for n in nodes], line=dict(width=2, color="#1E293B")),
+        text=[n["name"] for n in nodes], textposition="bottom center",
+        hovertext=[f"{n['name']} ({n['type']})" for n in nodes], hoverinfo="text", showlegend=False
+    ))
+    fig.update_layout(
+        height=200, margin=dict(l=10, r=10, t=10, b=40),
+        xaxis=dict(visible=False, range=[-0.5, 2.5]), yaxis=dict(visible=False, range=[-0.3, 0.3]),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Illustration: a relational triple chain — each colored node is a typed entity, each labeled edge a relation.")
+
+
+def render_prp_ranking_diagram():
+    """Illustrates PRP: documents ordered by decreasing probability of relevance."""
+    docs = [f"D{i}" for i in range(1, 7)]
+    probs = [0.92, 0.81, 0.63, 0.44, 0.27, 0.11]
+    fig = go.Figure(go.Bar(
+        x=docs, y=probs, marker_color=probs, marker_colorscale="Blues",
+        text=[f"{p:.2f}" for p in probs], textposition="outside"
+    ))
+    fig.update_layout(
+        height=260, margin=dict(l=10, r=10, t=30, b=10),
+        title=dict(text="Documents Ranked by P(R=1 | D, Q)", font=dict(size=13)),
+        yaxis=dict(title="Estimated Probability of Relevance", range=[0, 1.05]),
+        xaxis=dict(title="Documents in Ranked Order"),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Illustration: PRP orders documents so relevance probability strictly decreases down the ranked list.")
+
+
+def render_bm25_saturation_diagram():
+    """Illustrates BM25 term-frequency saturation for a few k1 values."""
+    tf_vals = list(range(0, 11))
+    fig = go.Figure()
+    for k1, color in [(1.0, "#94A3B8"), (1.5, "#2563EB"), (2.5, "#F59E0B")]:
+        y_vals = [tf * (k1 + 1.0) / (tf + k1) for tf in tf_vals]
+        fig.add_trace(go.Scatter(x=tf_vals, y=y_vals, mode="lines+markers", name=f"k1 = {k1}", line=dict(color=color)))
+    fig.update_layout(
+        height=280, margin=dict(l=10, r=10, t=30, b=10),
+        title=dict(text="Term Frequency Saturation Curve", font=dict(size=13)),
+        xaxis=dict(title="Raw term frequency f(q, D)"),
+        yaxis=dict(title="TF component of BM25 score"),
+        legend=dict(orientation="h", y=-0.2),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Illustration: higher k1 lets repeated term occurrences keep contributing longer before the score plateaus.")
+
+
+def render_ndcg_discount_diagram():
+    """Illustrates the logarithmic position discount used in NDCG."""
+    ranks = list(range(1, 11))
+    discounts = [1.0 / math.log2(r + 1) for r in ranks]
+    fig = go.Figure(go.Bar(x=ranks, y=discounts, marker_color="#10B981"))
+    fig.update_layout(
+        height=260, margin=dict(l=10, r=10, t=30, b=10),
+        title=dict(text="NDCG Positional Discount by Rank", font=dict(size=13)),
+        xaxis=dict(title="Rank Position", dtick=1),
+        yaxis=dict(title="Discount Weight 1 / log2(rank + 1)"),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("Illustration: a relevant document found at rank 1 counts far more than the same document found at rank 10.")
+
+
 def render_theory_section():
     """Renders Section 3: In-Depth Theoretical Foundations."""
     st.markdown("### Theoretical Foundations")
+
+    video_path = os.path.join(os.path.dirname(__file__), "video", "Experiment6_KGIRS_explainer_1.mp4")
+    if os.path.exists(video_path):
+        st.markdown("#### Explaination video")
+        st.video(video_path)
+        st.divider()
 
     st.markdown("#### 1. Entity Extraction & Knowledge Graph Construction")
     st.markdown("""
@@ -946,6 +1128,7 @@ A Knowledge Graph $\\mathcal{G} = (\\mathcal{E}, \\mathcal{R}, \\mathcal{T})$ co
   $$\\text{Triple} = (\\text{Head Entity}, \\text{Predicate Relation}, \\text{Tail Entity})$$
   Example: `(Geoffrey Hinton, affiliated_with, Google Brain)`
 """)
+    render_triple_diagram()
 
     st.divider()
     st.markdown("#### 2. The Probability Ranking Principle (PRP)")
@@ -956,6 +1139,7 @@ Formulated by Stephen E. Robertson in 1977, the **Probability Ranking Principle*
 Mathematically, let $R \\in \\{0, 1\\}$ denote binary relevance. Documents $D$ are ranked by the posterior odds of relevance given query $Q$:
 $$\\text{Odds}(R=1 | D, Q) = \\frac{P(R=1 | D, Q)}{P(R=0 | D, Q)}$$
 """)
+    render_prp_ranking_diagram()
 
     st.divider()
     st.markdown("#### 3. Robertson-Spärck Jones Okapi BM25 Model")
@@ -971,6 +1155,7 @@ Where:
 - **$\\text{IDF}(q)$**: Probabilistic Inverse Document Frequency:
   $$\\text{IDF}(q) = \\ln \\left( 1 + \\frac{N - n(q) + 0.5}{n(q) + 0.5} \\right)$$
 """)
+    render_bm25_saturation_diagram()
 
     st.divider()
     st.markdown("#### 4. Entity-Aware Probabilistic Ranking")
@@ -990,6 +1175,7 @@ Where $\\alpha$ is the entity boost factor and $\\mathcal{E}_Q, \\mathcal{E}_D$ 
 - **Normalized Discounted Cumulative Gain (NDCG@K)**:
   $$\\text{DCG}@K = \\sum_{i=1}^K \\frac{2^{\\text{rel}_i} - 1}{\\log_2(i + 1)}, \\quad \\text{NDCG}@K = \\frac{\\text{DCG}@K}{\\text{IDCG}@K}$$
 """)
+    render_ndcg_discount_diagram()
 
 
 def render_casestudy_section():
@@ -1085,11 +1271,29 @@ def render_simulation_section():
     with c_corpus:
         corpus_choice = st.selectbox(
             "Select Benchmark Corpus Domain:",
-            options=list(DATA_CORPORA.keys()),
+            options=list(DATA_CORPORA.keys()) + ["Add custom text"],
             index=0
         )
-        selected_corpus = DATA_CORPORA[corpus_choice]["documents"]
-        st.caption(f"_{DATA_CORPORA[corpus_choice]['description']}_")
+
+        if corpus_choice == "Add custom text":
+            custom_text = st.text_area(
+                "Paste your own document(s):",
+                height=140,
+                placeholder=(
+                    "Marie Curie conducted pioneering research on radioactivity "
+                    "at the University of Paris.\n---\nSecond document text here..."
+                )
+            )
+            selected_corpus = build_custom_corpus_from_text(custom_text) if custom_text.strip() else []
+            st.caption(
+                "_Separate multiple documents with a line containing only `---`. "
+                "Entities/relations are extracted with a lightweight heuristic "
+                "(capitalized-phrase detection), not a trained NER model, so results "
+                "may be imperfect._"
+            )
+        else:
+            selected_corpus = DATA_CORPORA[corpus_choice]["documents"]
+            st.caption(f"_{DATA_CORPORA[corpus_choice]['description']}_")
 
     with c_query:
         preset_queries = {
@@ -1106,8 +1310,27 @@ def render_simulation_section():
                 "Linus Torvalds Linux Kernel cloud virtualization San Francisco"
             ]
         }
-        query_options = preset_queries.get(corpus_choice, ["Geoffrey Hinton deep learning Google"])
-        selected_query = st.selectbox("Select Test Query (or type custom query):", query_options)
+        if corpus_choice == "Add custom text":
+            query_options = ["Custom Query"]
+        else:
+            query_options = preset_queries.get(corpus_choice, ["Geoffrey Hinton deep learning Google"]) + ["Custom Query"]
+
+        query_choice = st.selectbox("Select Test Query:", query_options)
+
+        if query_choice == "Custom Query":
+            selected_query = st.text_input(
+                "Enter your custom query:",
+                placeholder="e.g. Marie Curie radioactivity Paris"
+            )
+        else:
+            selected_query = query_choice
+
+    if not selected_corpus:
+        st.warning("Paste at least one custom document above to run the simulation.")
+        return
+    if not selected_query or not selected_query.strip():
+        st.warning("Enter a custom query above to run the simulation.")
+        return
 
     # Hyperparameters
     c1, c2, c3, c4 = st.columns(4)
