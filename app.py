@@ -613,9 +613,8 @@ def evaluate_comparative_retrieval(corpus_docs: list, query_str: str,
         if is_rel:
             ground_truth.add(d["doc_id"])
 
-    # If ground truth is empty, designate the doc with highest keyword overlap
-    if not ground_truth:
-        ground_truth.add(corpus_docs[0]["doc_id"])
+    # If ground truth is empty, no documents are genuinely relevant to this query
+    # (Previously this fallback forced the first doc as relevant, causing misleading labels)
 
     # 1. Standard BM25 Scoring
     bm25_results = []
